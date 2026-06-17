@@ -32,6 +32,7 @@ class SearchController extends Controller
                 'contacts as contacts_30' => fn($q) => $q->where('created_at', '>=', now()->subDays(30)),
             ]);
 
+        $usedFulltext = false;
         if ($q !== '') {
             if (mb_strlen($q) >= 3) {
                 $words = preg_split('/\s+/', $q);
@@ -53,6 +54,7 @@ class SearchController extends Controller
                      ))',
                     [$boolQ, $boolQ]
                 );
+                $usedFulltext = true;
             } else {
                 $like = "%{$q}%";
                 $query->where(function ($q2) use ($like) {
@@ -72,10 +74,9 @@ class SearchController extends Controller
             $query->whereHas('topics', fn($t) => $t->where('slug', $topic));
         }
 
-        $hasFulltext = $q !== '' && mb_strlen($q) >= 3;
         foreach ($sorts as $s) {
             match ($s['field']) {
-                'relevance' => $hasFulltext ? $query->orderByRaw('(name_score + title_score) DESC') : null,
+                'relevance' => $usedFulltext ? $query->orderByRaw('(name_score + title_score) DESC') : null,
                 'contacts'  => $query->orderBy('contacts_30', $s['dir']),
                 'active'    => $query->orderBy('supervisors.active_titles', $s['dir']),
                 'alpha'     => $query->orderBy('supervisors.name', $s['dir']),
@@ -85,11 +86,74 @@ class SearchController extends Controller
 
         $supervisors = $query->paginate(12)->withQueryString();
 
+        // Fuzzy fallback: if FULLTEXT returned nothing, retry with similarity matching
+        if ($usedFulltext && $supervisors->total() === 0) {
+            $fuzzyIds = $this->fuzzyIds($q);
+            if (!empty($fuzzyIds)) {
+                $supervisors = Supervisor::with(['programs', 'topics'])
+                    ->withCount([
+                        'pageViews as views_30'   => fn($q) => $q->where('created_at', '>=', now()->subDays(30)),
+                        'contacts as contacts_30' => fn($q) => $q->where('created_at', '>=', now()->subDays(30)),
+                    ])
+                    ->whereIn('supervisors.id', $fuzzyIds)
+                    ->when($program === 'global-class', fn($q) => $q->where('supervisors.is_global_class', true))
+                    ->when($program && $program !== 'global-class', fn($q) => $q->whereHas('programs', fn($p) => $p->where('slug', $program)))
+                    ->when($topic, fn($q) => $q->whereHas('topics', fn($t) => $t->where('slug', $topic)))
+                    ->orderBy('supervisors.name')
+                    ->paginate(12)
+                    ->withQueryString();
+            }
+        }
+
         if ($request->header('HX-Request')) {
             return view('partials.supervisor-cards', compact('supervisors'));
         }
 
         $programs = \App\Models\Program::with('topics')->get();
         return view('home', compact('supervisors', 'programs'));
+    }
+
+    private function fuzzyIds(string $q): array
+    {
+        $queryWords = preg_split('/\s+/', mb_strtolower(trim($q)));
+
+        $rows = Supervisor::with('theses:id,supervisor_id,title')
+            ->select(['id', 'name', 'specific_topics'])
+            ->get();
+
+        $threshold = 65;
+        $matched   = [];
+
+        foreach ($rows as $supervisor) {
+            $blob = mb_strtolower(implode(' ', array_filter([
+                $supervisor->name,
+                $supervisor->specific_topics,
+                $supervisor->theses->pluck('title')->implode(' '),
+            ])));
+
+            $blobWords = preg_split('/[\s;,]+/', $blob);
+
+            $score = 0;
+            foreach ($queryWords as $qw) {
+                $best = 0;
+                foreach ($blobWords as $bw) {
+                    similar_text($qw, $bw, $pct);
+                    if ($pct > $best) $best = $pct;
+                    // Also check if query word is a substring (handles merged words)
+                    if (str_contains($bw, $qw) || str_contains($qw, $bw)) {
+                        $best = max($best, 80.0);
+                    }
+                }
+                $score += $best;
+            }
+
+            $avgScore = $score / count($queryWords);
+            if ($avgScore >= $threshold) {
+                $matched[$supervisor->id] = $avgScore;
+            }
+        }
+
+        arsort($matched);
+        return array_keys($matched);
     }
 }
