@@ -77,7 +77,7 @@
     x-cloak
 >
     {{-- Click-catcher --}}
-    <div x-show="active" class="fixed inset-0 z-[9990]" @click="skip"></div>
+    <div x-show="active" class="fixed inset-0 z-[9990]"></div>
 
     {{-- Spotlight box — smooth CSS transition on position/size --}}
     <div
