@@ -6,6 +6,8 @@ use App\Http\Controllers\SearchController;
 use App\Http\Controllers\SupervisorController;
 use Illuminate\Support\Facades\Route;
 
+/* test */
+
 Route::middleware('student.cookie')->group(function () {
     Route::get('/', [HomeController::class, 'index'])->name('home');
     Route::get('/search', [SearchController::class, 'search'])->name('search');
